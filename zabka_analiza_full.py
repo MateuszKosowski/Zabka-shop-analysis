@@ -512,17 +512,15 @@ class BindLegendToLayer(MacroElement):
 
 main_map.add_child(BindLegendToLayer(choropleth))
 
-# WARSTWA 5: Strefy dostępności (bąbelki) - OFF
-zones_layer = folium.FeatureGroup(name="🎯 Strefy dostępności (kolorowe bąbelki)", show=False)
-sample_zones = gdf_population[gdf_population['RES'] > 200].sample(
-    min(2500, len(gdf_population)), random_state=42
-).to_crs(epsg=4326)
+# WARSTWA 5: Strefy dostępności (bąbelki) - WSZYSTKIE PUNKTY
+zones_layer = folium.FeatureGroup(name="🎯 Strefy dostępności (wszystkie >200 osób)", show=False)
+zones_all = gdf_population[gdf_population['RES'] > 200].to_crs(epsg=4326)
 
-for _, row in sample_zones.iterrows():
+for _, row in zones_all.iterrows():
     c = row.geometry.centroid
     color = color_map.get(row.distance_cat, '#999')
-    radius = min(10, max(3, row.RES / 300))
-    
+    radius = min(8, max(2, row.RES / 400))
+
     folium.CircleMarker(
         [c.y, c.x],
         radius=radius,
