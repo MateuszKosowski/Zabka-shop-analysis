@@ -1,5 +1,5 @@
 """
-Kompleksowa analiza sieci sklepów Żabka w Polsce - Zoptymalizowana wersja
+Kompleksowa analiza sieci sklepów Żabka w Polsce - Rozszerzona wersja
 
 Autorzy:
 - Jakub Rosiak 251620
@@ -11,6 +11,7 @@ Analiza obejmuje:
 - Rozmieszczenie przestrzenne i dostępność
 - Identyfikacja obszarów niedostępnych
 - Interaktywne mapy z warstwami analitycznymi
+- Eksport danych do CSV
 """
 
 import os
@@ -25,6 +26,7 @@ import seaborn as sns
 import folium
 from folium.plugins import MarkerCluster, HeatMap
 from scipy.spatial import cKDTree
+from scipy import stats
 from branca.element import MacroElement
 from jinja2 import Template
 
@@ -42,6 +44,20 @@ plt.rcParams.update({
 })
 
 os.makedirs("output", exist_ok=True)
+
+
+# ============================================================================
+# FUNKCJE POMOCNICZE
+# ============================================================================
+
+def add_bar_labels(ax, fontsize=9, offset=0):
+    """Dodaje etykiety wartości do słupków na wykresie."""
+    for p in ax.patches:
+        w = p.get_width()
+        if w > 0:
+            ax.text(w + offset, p.get_y() + p.get_height()/2, f'{int(w)}', 
+                    ha='left', va='center', fontsize=fontsize)
+
 
 # ============================================================================
 # WCZYTYWANIE DANYCH (RAZ, EFEKTYWNIE)
@@ -129,6 +145,38 @@ underserved['priority'] = underserved['RES'] * underserved['distance_km']
 underserved = underserved.sort_values('priority', ascending=False)
 print(f"✓ Obszary niedostępne: {len(underserved)}")
 
+# 6. Przypisanie województw do komórek siatki (dla boxplotu)
+# Używamy najbliższego sklepu do przypisania województwa
+_, nearest_shop_idx = tree.query(grid_coords)
+gdf_population['voivodeship'] = df_shops.iloc[nearest_shop_idx]['voivodeship'].values
+print(f"✓ Województwa przypisane do komórek")
+
+# 7. Statystyki miast - średni dystans (zoptymalizowane)
+print("  Obliczanie statystyk miast...")
+city_shop_counts = df_shops.groupby('city').size()
+cities_with_min_shops = city_shop_counts[city_shop_counts >= 5].index
+
+city_distances = []
+for city in cities_with_min_shops:
+    city_mask = df_shops['city'] == city
+    city_shops = gdf_shops_2180[city_mask]
+    if len(city_shops) > 0:
+        city_center = city_shops.geometry.unary_union.centroid
+        nearby_mask = gdf_population.geometry.centroid.distance(city_center) < 5000
+        if nearby_mask.sum() > 0:
+            avg_dist = gdf_population.loc[nearby_mask, 'distance_m'].mean()
+            pop = gdf_population.loc[nearby_mask, 'RES'].sum()
+            city_distances.append({
+                'city': city,
+                'avg_distance_m': avg_dist,
+                'shops_count': len(city_shops),
+                'population': pop
+            })
+
+df_city_stats = pd.DataFrame(city_distances)
+df_city_stats = df_city_stats.sort_values('avg_distance_m')
+print(f"✓ Statystyki miast obliczone: {len(df_city_stats)} miast")
+
 # ============================================================================
 # STATYSTYKI
 # ============================================================================
@@ -148,8 +196,14 @@ print(f"  • W promieniu 2 km: {pop_within_2km/total_pop*100:.1f}%")
 print(f"  • W promieniu 5 km: {pop_within_5km/total_pop*100:.1f}%")
 print(f"  • Dalej niż 5 km: {far_pop:,.0f} osób ({far_pop/total_pop*100:.1f}%)")
 
+# Dodatkowe statystyki
+avg_distance = gdf_population['distance_m'].mean()
+median_distance = gdf_population['distance_m'].median()
+print(f"  • Średni dystans: {avg_distance:.0f} m")
+print(f"  • Mediana dystansu: {median_distance:.0f} m")
+
 # ============================================================================
-# WYKRESY STATYSTYCZNE (WSZYSTKIE NA RAZ)
+# WYKRESY STATYSTYCZNE - ROZSZERZONE (10 WYKRESÓW)
 # ============================================================================
 
 print("\n" + "=" * 70)
@@ -176,7 +230,7 @@ pop_by_dist = gdf_population.groupby('distance_cat')['RES'].sum().reindex(labels
 color_map = {'< 1km': '#2ecc71', '1-2km': '#f1c40f', '2-5km': '#e67e22', '> 5km': '#e74c3c'}
 dist_colors = [color_map[label] for label in labels]
 
-# 6 wykresów na jednym rysunku
+# ==================== PLANSZA 1: 6 WYKRESÓW PODSTAWOWYCH ====================
 fig = plt.figure(figsize=(18, 12), facecolor='white')
 gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
 
@@ -185,33 +239,21 @@ ax1 = fig.add_subplot(gs[0, 0])
 sns.barplot(x=services_counts.values, y=services_names, palette="viridis", ax=ax1)
 ax1.set_title("Usługi dodatkowe w sklepach", fontweight='bold', fontsize=13)
 ax1.set_xlabel("Liczba placówek")
-for p in ax1.patches:
-    w = p.get_width()
-    if w > 0:
-        ax1.text(w, p.get_y() + p.get_height()/2, f'{int(w)}', 
-                ha='left', va='center', fontsize=9)
+add_bar_labels(ax1)
 
 # 2. Województwa
 ax2 = fig.add_subplot(gs[0, 1])
 sns.barplot(x=voivodeships.values, y=voivodeships.index, palette="mako", ax=ax2)
 ax2.set_title("Liczba sklepów wg województw", fontweight='bold', fontsize=13)
 ax2.set_xlabel("Liczba sklepów")
-for p in ax2.patches:
-    w = p.get_width()
-    if w > 0:
-        ax2.text(w, p.get_y() + p.get_height()/2, f'{int(w)}', 
-                ha='left', va='center', fontsize=9)
+add_bar_labels(ax2)
 
 # 3. Top miasta
 ax3 = fig.add_subplot(gs[1, 0])
 sns.barplot(x=top_cities.values, y=top_cities.index, palette="rocket", ax=ax3)
 ax3.set_title("Top 10 miast", fontweight='bold', fontsize=13)
 ax3.set_xlabel("Liczba sklepów")
-for p in ax3.patches:
-    w = p.get_width()
-    if w > 0:
-        ax3.text(w, p.get_y() + p.get_height()/2, f'{int(w)}', 
-                ha='left', va='center', fontsize=9)
+add_bar_labels(ax3)
 
 # 4. Populacja wg dystansu
 ax4 = fig.add_subplot(gs[1, 1])
@@ -247,7 +289,7 @@ ax6.scatter(sample['distance_km'], sample['RES'], alpha=0.3, s=8, color='#72b7b2
 ax6.axvline(1.5, color='#e45756', linestyle='--', linewidth=1.5, label='Próg 1.5 km')
 ax6.axhline(500, color='#f58518', linestyle='--', linewidth=1.5, label='Próg 500 osób')
 ax6.set_xlim(0, 10)
-ax6.set_title("Ludność vs dystans", fontweight='bold', fontsize=13)
+ax6.set_title("Ludność vs dystans (próbka 5000)", fontweight='bold', fontsize=13)
 ax6.set_xlabel("Dystans (km)")
 ax6.set_ylabel("Ludność w komórce")
 ax6.legend(frameon=True, loc='upper right')
@@ -255,6 +297,164 @@ ax6.legend(frameon=True, loc='upper right')
 plt.savefig('output/analiza_kompletna.png', dpi=300, bbox_inches='tight', facecolor='white')
 print("✓ Zapisano: output/analiza_kompletna.png")
 plt.close()
+
+# ==================== PLANSZA 2: 4 NOWE WYKRESY ====================
+fig2 = plt.figure(figsize=(18, 12), facecolor='white')
+gs2 = fig2.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+
+# 7. HISTOGRAM DYSTANSÓW
+ax7 = fig2.add_subplot(gs2[0, 0])
+pop_with_res = gdf_population[gdf_population['RES'] > 0]
+ax7.hist(pop_with_res['distance_km'], bins=50, weights=pop_with_res['RES'], 
+         color='#4c78a8', edgecolor='white', alpha=0.8)
+ax7.axvline(1, color='#2ecc71', linestyle='--', linewidth=2, label='1 km')
+ax7.axvline(2, color='#f1c40f', linestyle='--', linewidth=2, label='2 km')
+ax7.axvline(5, color='#e74c3c', linestyle='--', linewidth=2, label='5 km')
+ax7.set_title("Rozkład dystansów do najbliższej Żabki", fontweight='bold', fontsize=13)
+ax7.set_xlabel("Dystans (km)")
+ax7.set_ylabel("Liczba mieszkańców")
+ax7.set_xlim(0, 15)
+ax7.legend(loc='upper right', frameon=True)
+ax7.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x/1e6)}M'))
+
+# 8. RANKING MIAST WG DOSTĘPNOŚCI
+ax8 = fig2.add_subplot(gs2[0, 1])
+top_accessible = df_city_stats.head(15).copy()
+colors_access = ['#2ecc71' if x < 500 else '#f1c40f' if x < 700 else '#e67e22' 
+                 for x in top_accessible['avg_distance_m']]
+bars = ax8.barh(top_accessible['city'], top_accessible['avg_distance_m'], color=colors_access)
+ax8.set_title("Top 15 miast - najlepsza dostępność Żabki", fontweight='bold', fontsize=13)
+ax8.set_xlabel("Średni dystans do Żabki (m)")
+ax8.invert_yaxis()
+for i, (bar, val) in enumerate(zip(bars, top_accessible['avg_distance_m'])):
+    ax8.text(val + 10, bar.get_y() + bar.get_height()/2, f'{int(val)}m', 
+             va='center', fontsize=9)
+
+# 9. KORELACJA: GĘSTOŚĆ VS SKLEPY
+ax9 = fig2.add_subplot(gs2[1, 0])
+# Agregacja per komórka - ile mieszkańców na km² vs ile sklepów w promieniu 1km
+grid_with_pop = gdf_population[gdf_population['RES'] > 100].copy()
+sample_corr = grid_with_pop.sample(min(3000, len(grid_with_pop)), random_state=42)
+
+ax9.scatter(sample_corr['RES'], sample_corr['shop_count'], alpha=0.4, s=15, color='#72b7b2')
+
+# Linia trendu
+mask_valid = (sample_corr['shop_count'] > 0) & (sample_corr['RES'] > 0)
+if mask_valid.sum() > 10:
+    slope, intercept, r_value, _, _ = stats.linregress(
+        sample_corr.loc[mask_valid, 'RES'], 
+        sample_corr.loc[mask_valid, 'shop_count']
+    )
+    x_line = np.linspace(sample_corr['RES'].min(), sample_corr['RES'].max(), 100)
+    y_line = slope * x_line + intercept
+    ax9.plot(x_line, y_line, color='#e45756', linewidth=2, label=f'R² = {r_value**2:.2f}')
+    ax9.legend(loc='upper right', frameon=True)
+
+ax9.set_title("Korelacja: liczba mieszkańców vs sklepy", fontweight='bold', fontsize=13)
+ax9.set_xlabel("Liczba mieszkańców w komórce")
+ax9.set_ylabel("Liczba sklepów")
+
+# 10. BOXPLOT - DYSTANSE WG WOJEWÓDZTW
+ax10 = fig2.add_subplot(gs2[1, 1])
+voiv_order = gdf_population.groupby('voivodeship')['distance_km'].median().sort_values().index
+pop_sample = gdf_population[gdf_population['RES'] > 50].sample(
+    min(10000, len(gdf_population)), random_state=42
+)
+sns.boxplot(data=pop_sample, x='voivodeship', y='distance_km', 
+            order=voiv_order, palette='viridis', ax=ax10)
+ax10.set_title("Dystans do Żabki wg województw", fontweight='bold', fontsize=13)
+ax10.set_xlabel("Województwo")
+ax10.set_ylabel("Dystans (km)")
+ax10.set_xticklabels(ax10.get_xticklabels(), rotation=45, ha='right')
+ax10.set_ylim(0, 15)
+
+plt.tight_layout()
+plt.savefig('output/analiza_rozszerzona.png', dpi=300, bbox_inches='tight', facecolor='white')
+print("✓ Zapisano: output/analiza_rozszerzona.png")
+plt.close()
+
+# ============================================================================
+# EKSPORT DO CSV (ZAMIAST EXCEL - BEZ DODATKOWYCH ZALEŻNOŚCI)
+# ============================================================================
+
+print("\n" + "=" * 70)
+print("EKSPORT DO CSV")
+print("=" * 70)
+
+# Folder na eksport
+os.makedirs("output/csv", exist_ok=True)
+
+# 1. Podsumowanie
+summary_data = {
+    'Metryka': [
+        'Liczba sklepów Żabka',
+        'Liczba komórek siatki GUS',
+        'Całkowita populacja',
+        'Populacja w promieniu 1 km',
+        'Populacja w promieniu 2 km',
+        'Populacja w promieniu 5 km',
+        'Populacja dalej niż 5 km',
+        'Średni dystans do Żabki (m)',
+        'Mediana dystansu do Żabki (m)',
+        'Liczba obszarów niedostępnych',
+        '% populacji w 1 km',
+        '% populacji w 2 km',
+        '% populacji w 5 km'
+    ],
+    'Wartość': [
+        len(df_shops),
+        len(gdf_population),
+        int(total_pop),
+        int(pop_within_1km),
+        int(pop_within_2km),
+        int(pop_within_5km),
+        int(far_pop),
+        round(avg_distance, 0),
+        round(median_distance, 0),
+        len(underserved),
+        round(pop_within_1km/total_pop*100, 1),
+        round(pop_within_2km/total_pop*100, 1),
+        round(pop_within_5km/total_pop*100, 1)
+    ]
+}
+df_summary = pd.DataFrame(summary_data)
+df_summary.to_csv('output/csv/01_podsumowanie.csv', index=False, encoding='utf-8-sig')
+print("  ✓ Zapisano: output/csv/01_podsumowanie.csv")
+
+# 2. Ranking miast
+df_city_export = df_city_stats.head(50).copy()
+df_city_export.columns = ['Miasto', 'Średni dystans (m)', 'Liczba sklepów', 'Populacja okolicy']
+df_city_export.to_csv('output/csv/02_ranking_miast.csv', index=False, encoding='utf-8-sig')
+print("  ✓ Zapisano: output/csv/02_ranking_miast.csv")
+
+# 3. Top 50 obszarów niedostępnych
+underserved_export = underserved.head(50).copy()
+underserved_export = underserved_export[['RES', 'distance_m', 'distance_km', 'priority']].reset_index(drop=True)
+underserved_export.columns = ['Ludność', 'Dystans (m)', 'Dystans (km)', 'Priorytet ekspansji']
+underserved_export['Ranking'] = range(1, len(underserved_export) + 1)
+underserved_export = underserved_export[['Ranking', 'Ludność', 'Dystans (m)', 'Dystans (km)', 'Priorytet ekspansji']]
+underserved_export.to_csv('output/csv/03_obszary_niedostepne.csv', index=False, encoding='utf-8-sig')
+print("  ✓ Zapisano: output/csv/03_obszary_niedostepne.csv")
+
+# 4. Statystyki województw
+voiv_stats = gdf_population.groupby('voivodeship').agg({
+    'RES': 'sum',
+    'distance_m': ['mean', 'median'],
+    'shop_count': 'sum'
+}).reset_index()
+voiv_stats.columns = ['Województwo', 'Populacja', 'Średni dystans (m)', 'Mediana dystansu (m)', 'Liczba sklepów']
+voiv_stats['Ludzie na sklep'] = (voiv_stats['Populacja'] / voiv_stats['Liczba sklepów'].replace(0, 1)).round(0)
+voiv_stats = voiv_stats.sort_values('Średni dystans (m)')
+voiv_stats.to_csv('output/csv/04_statystyki_wojewodztwa.csv', index=False, encoding='utf-8-sig')
+print("  ✓ Zapisano: output/csv/04_statystyki_wojewodztwa.csv")
+
+# 5. Top miasta (liczba sklepów)
+df_top_cities = df_shops['city'].value_counts().head(30).reset_index()
+df_top_cities.columns = ['Miasto', 'Liczba sklepów']
+df_top_cities.to_csv('output/csv/05_top_miasta_sklepy.csv', index=False, encoding='utf-8-sig')
+print("  ✓ Zapisano: output/csv/05_top_miasta_sklepy.csv")
+
+print("✓ Eksport CSV zakończony: output/csv/")
 
 # ============================================================================
 # MAPA INTERAKTYWNA - KOMPLEKSOWA (WSZYSTKIE WARSTWY)
@@ -274,11 +474,10 @@ for name, tiles, show in [
 ]:
     folium.TileLayer(tiles=tiles, name=f"Tło: {name}", control=True, show=show).add_to(main_map)
 
-# WARSTWA 1: Sklepy Żabka (klastry) - DOMYŚLNIE ON (jedyna włączona)
-# WSZYSTKIE sklepy, nie sample - żeby zgadzało się z danymi choropleth!
+# WARSTWA 1: Sklepy Żabka (klastry) - DOMYŚLNIE ON
 shops_layer = folium.FeatureGroup(name="🐸 Sklepy Żabka (wszystkie)", show=True)
 cluster = MarkerCluster().add_to(shops_layer)
-for row in df_shops.itertuples():  # WSZYSTKIE sklepy
+for row in df_shops.itertuples():
     folium.Marker(
         [row.lat, row.lng],
         tooltip=f"<b>{row.city}</b><br>{row.address}",
@@ -330,10 +529,10 @@ percentile_95 = gdf_with_shops['people_per_shop'].quantile(0.95)
 max_val = gdf_with_shops['people_per_shop'].max()
 
 # Rozsądne przedziały + jeden duży na końcu dla outlierów
-bins = [0, 1000, 2500, 5000, 7500, percentile_95, max_val + 1]
-bins = sorted(list(set([float(b) for b in bins])))  # Unikalne i posortowane
+bins_choro = [0, 1000, 2500, 5000, 7500, percentile_95, max_val + 1]
+bins_choro = sorted(list(set([float(b) for b in bins_choro])))
 
-print(f"  Choropleth bins: {[int(b) for b in bins]}")
+print(f"  Choropleth bins: {[int(b) for b in bins_choro]}")
 
 choropleth = folium.Choropleth(
     geo_data=gdf_with_shops_4326,
@@ -346,7 +545,7 @@ choropleth = folium.Choropleth(
     legend_name='Mieszkańców na sklep',
     name="📊 Obciążenie sklepów (ludzie/sklep)",
     show=False,
-    bins=bins,
+    bins=bins_choro,
     nan_fill_color='white',
     nan_fill_opacity=0
 )
@@ -412,29 +611,28 @@ for _, row in sample_zones.iterrows():
 
 zones_layer.add_to(main_map)
 
-# WARSTWA 6: Dostępność wszystkich obszarów (mniejsze bąbelki) - OFF
-all_bubbles = gdf_population[gdf_population['RES'] > 400].sample(
-    min(3500, len(gdf_population)), random_state=123
-).to_crs(epsg=4326)
+# WARSTWA 6: TOP 10 LOKALIZACJI NA NOWE SKLEPY - OFF
+top_locations_layer = folium.FeatureGroup(name="🏆 Top 10 lokalizacji na nowy sklep", show=False)
+top_10_locations = underserved.head(10).to_crs(epsg=4326)
 
-all_bubbles_layer = folium.FeatureGroup(name="🎈 Wszystkie obszary zamieszkałe", show=False)
-for _, row in all_bubbles.iterrows():
+for rank, (_, row) in enumerate(top_10_locations.iterrows(), 1):
     c = row.geometry.centroid
-    color = color_map.get(row.distance_cat, '#999')
-    radius = min(12, max(3, row.RES / 300))
     
-    folium.CircleMarker(
+    folium.Marker(
         [c.y, c.x],
-        radius=radius,
-        color=color,
-        fill=True,
-        fill_color=color,
-        fill_opacity=0.45,
-        weight=0,
-        tooltip=f"Ludność: {int(row.RES)}<br>Dystans: {row.distance_cat}"
-    ).add_to(all_bubbles_layer)
+        popup=f"""
+        <div style='width:200px'>
+            <h4 style='color:#e74c3c; margin:5px 0'>🏆 #{rank} Priorytet ekspansji</h4>
+            <b>Populacja:</b> {int(row.RES):,} osób<br>
+            <b>Dystans do Żabki:</b> {row.distance_km:.1f} km<br>
+            <b>Wskaźnik priorytetu:</b> {row.priority:,.0f}
+        </div>
+        """,
+        tooltip=f"🏆 #{rank} | {int(row.RES):,} osób | {row.distance_km:.1f} km",
+        icon=folium.Icon(color="red", icon="star", prefix="fa")
+    ).add_to(top_locations_layer)
 
-all_bubbles_layer.add_to(main_map)
+top_locations_layer.add_to(main_map)
 
 # Stylizacja kontrolki warstw
 css = """
@@ -476,8 +674,10 @@ print(f"\n✅ Populacja w 1 km: {pop_within_1km/total_pop*100:.1f}%")
 print(f"✅ Populacja w 2 km: {pop_within_2km/total_pop*100:.1f}%")
 print(f"✅ Populacja w 5 km: {pop_within_5km/total_pop*100:.1f}%")
 print(f"\n📁 Wygenerowane pliki:")
-print(f"   • output/analiza_kompletna.png")
-print(f"   • output/mapa_interaktywna.html")
+print(f"   • output/analiza_kompletna.png (6 wykresów podstawowych)")
+print(f"   • output/analiza_rozszerzona.png (4 wykresy dodatkowe)")
+print(f"   • output/csv/ (5 plików CSV z danymi)")
+print(f"   • output/mapa_interaktywna.html (6 warstw)")
 print("\n" + "=" * 70)
 print("✨ ANALIZA ZAKOŃCZONA POMYŚLNIE")
 print("=" * 70)
