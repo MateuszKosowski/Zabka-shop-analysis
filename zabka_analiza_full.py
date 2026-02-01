@@ -14,21 +14,80 @@ Analiza obejmuje:
 - Eksport danych do CSV
 """
 
+# ============================================================================
+# CEL I ZAKRES PROJEKTU (do przerobienia na markdown)
+# ============================================================================
+# Cel: ocena dostępności przestrzennej sieci sklepów Żabka w Polsce oraz
+# identyfikacja obszarów o podwyższonym priorytecie ekspansji.
+# Problem: gdzie mieszkańcy mają utrudniony dostęp do sklepu i jak wygląda
+# zróżnicowanie dostępności w skali kraju i województw.
+# Zakres: analiza całej Polski, z wykorzystaniem punktów sklepów oraz siatki
+# populacyjnej GUS (grid). Skupiamy się na metrykach dystansu, obciążenia
+# sklepów oraz gęstości i rozmieszczenia placówek.
+# Pytania badawcze:
+# - Jaki odsetek populacji mieszka w promieniu 1/2/5 km od sklepu?
+# - Które obszary (siatki) są niedostępne przy określonych progach?
+# - Jak różni się dostępność między województwami i miastami?
+# - Gdzie potencjalnie opłaca się otworzyć nowe placówki?
+
+# ============================================================================
+# DANE I ŹRÓDŁA (do przerobienia na markdown)
+# ============================================================================
+# 1) data/zabka_shops.csv
+#    - Punkty sklepów Żabka (lat/lng), miasto, adres, województwo, usługi.
+#    - Dane filtrowane do granic Polski (49-55N, 14-25E).
+# 2) data/GRID_NSP2021_RES/GRID_NSP2021_RES.shp
+#    - Siatka GUS z liczbą mieszkańców (RES) w komórce.
+#    - Dane w układzie EPSG:2180 (metryczny do obliczeń dystansu).
+# Uwaga: w analizie nie stosujemy dystansu po sieci drogowej, tylko dystans
+# euklidesowy (w metrach) od centroidu komórki do najbliższego sklepu.
+
+# ============================================================================
+# METODY ANALIZY I UZASADNIENIE (do przerobienia na markdown)
+# ============================================================================
+# - Spatial join: przypisanie sklepów do komórek siatki (ile sklepów w komórce).
+# - KDTree: szybkie wyznaczenie najbliższego sklepu dla każdej komórki.
+# - Klasy dystansów (1/2/5 km): progi zrozumiałe dla dostępności pieszej
+#   i lokalnej (szybka interpretacja dla odbiorcy nietechnicznego).
+# - Ludzie na sklep: wskaźnik obciążenia infrastruktury.
+# - Obszary niedostępne: warunek RES >= 500 oraz dystans > 1.5 km
+#   (progowe kryterium potencjalnego deficytu usług).
+# - Ranking miast i korelacje: porównanie dostępności między ośrodkami.
+# - Wizualizacje statystyczne + mapa interaktywna: szybka interpretacja wyników.
+
+# ============================================================================
+# ETAPY REALIZACJI (do przerobienia na markdown)
+# ============================================================================
+# 1) Wczytanie danych i przygotowanie GeoDataFrame.
+# 2) Obliczenia przestrzenne: spatial join, KDTree, kategorie dystansów.
+# 3) Analizy statystyczne: udziały populacji, średnie/mediany, korelacje.
+# 4) Wizualizacje: 10 wykresów + mapa interaktywna z warstwami.
+# 5) Eksport wyników do CSV (podsumowania i rankingi).
+
+# ============================================================================
+# OCZEKIWANE WYNIKI / NOWE INFORMACJE (do przerobienia na markdown)
+# ============================================================================
+# - Udział populacji w zasięgu 1/2/5 km od sklepu.
+# - Ranking obszarów niedostępnych i propozycje lokalizacji nowych sklepów.
+# - Różnice dostępności między województwami oraz miastami.
+# - Wskaźnik obciążenia (ludzie/sklep) i jego rozkład przestrzenny.
+# - Zależność gęstości populacji od liczby sklepów.
+
 import os
 import warnings
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+import folium
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-import folium
-from folium.plugins import MarkerCluster, HeatMap
-from scipy.spatial import cKDTree
-from scipy import stats
 from branca.element import MacroElement
+from folium.plugins import HeatMap, MarkerCluster
 from jinja2 import Template
+from scipy import stats
+from scipy.spatial import cKDTree
 
 warnings.filterwarnings('ignore')
 
@@ -55,7 +114,7 @@ def add_bar_labels(ax, fontsize=9, offset=0):
     for p in ax.patches:
         w = p.get_width()
         if w > 0:
-            ax.text(w + offset, p.get_y() + p.get_height()/2, f'{int(w)}', 
+            ax.text(w + offset, p.get_y() + p.get_height()/2, f'{int(w)}',
                     ha='left', va='center', fontsize=fontsize)
 
 
@@ -110,6 +169,7 @@ gdf_population.loc[shop_counts.index, 'shop_count'] = shop_counts
 print(f"✓ Spatial join: sklepy w komórkach")
 
 # 2. Dystans do najbliższej Żabki (KDTree - szybki)
+# KDTree zapewnia skalowalność dla dużej liczby komórek.
 shop_coords = np.column_stack([
     gdf_shops_2180.geometry.x,
     gdf_shops_2180.geometry.y
@@ -125,11 +185,13 @@ gdf_population['distance_km'] = distances / 1000
 print(f"✓ KDTree: dystanse obliczone")
 
 # 3. Kategorie dystansu
+# Progi 1/2/5 km użyte do interpretacji dostępności.
 bins = [0, 1000, 2000, 5000, np.inf]
 labels = ['< 1km', '1-2km', '2-5km', '> 5km']
 gdf_population['distance_cat'] = pd.cut(gdf_population['distance_m'], bins=bins, labels=labels)
 
 # 4. Ludzie na sklep (tylko tam gdzie są sklepy)
+# Wskaźnik obciążenia infrastruktury lokalnej.
 mask_shops = gdf_population['shop_count'] > 0
 gdf_population['people_per_shop'] = np.nan
 gdf_population.loc[mask_shops, 'people_per_shop'] = (
@@ -137,6 +199,7 @@ gdf_population.loc[mask_shops, 'people_per_shop'] = (
 )
 
 # 5. Obszary niedostępne (>= 500 osób i > 1.5 km)
+# Kryterium identyfikacji deficytu dostępności.
 underserved = gdf_population[
     (gdf_population['RES'] >= 500) &
     (gdf_population['distance_m'] > 1500)
@@ -147,11 +210,13 @@ print(f"✓ Obszary niedostępne: {len(underserved)}")
 
 # 6. Przypisanie województw do komórek siatki (dla boxplotu)
 # Używamy najbliższego sklepu do przypisania województwa
+# (przybliżenie dla komórek na granicach województw).
 _, nearest_shop_idx = tree.query(grid_coords)
 gdf_population['voivodeship'] = df_shops.iloc[nearest_shop_idx]['voivodeship'].values
 print(f"✓ Województwa przypisane do komórek")
 
 # 7. Statystyki miast - średni dystans (zoptymalizowane)
+# Analiza dotyczy miast z >= 5 sklepami; promień 5 km wokół centroidu miasta.
 print("  Obliczanie statystyk miast...")
 city_shop_counts = df_shops.groupby('city').size()
 cities_with_min_shops = city_shop_counts[city_shop_counts >= 5].index
@@ -305,7 +370,7 @@ gs2 = fig2.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
 # 7. HISTOGRAM DYSTANSÓW
 ax7 = fig2.add_subplot(gs2[0, 0])
 pop_with_res = gdf_population[gdf_population['RES'] > 0]
-ax7.hist(pop_with_res['distance_km'], bins=50, weights=pop_with_res['RES'], 
+ax7.hist(pop_with_res['distance_km'], bins=50, weights=pop_with_res['RES'],
          color='#4c78a8', edgecolor='white', alpha=0.8)
 ax7.axvline(1, color='#2ecc71', linestyle='--', linewidth=2, label='1 km')
 ax7.axvline(2, color='#f1c40f', linestyle='--', linewidth=2, label='2 km')
@@ -320,19 +385,20 @@ ax7.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{int(x/1e6)}M'))
 # 8. RANKING MIAST WG DOSTĘPNOŚCI
 ax8 = fig2.add_subplot(gs2[0, 1])
 top_accessible = df_city_stats.head(15).copy()
-colors_access = ['#2ecc71' if x < 500 else '#f1c40f' if x < 700 else '#e67e22' 
+colors_access = ['#2ecc71' if x < 500 else '#f1c40f' if x < 700 else '#e67e22'
                  for x in top_accessible['avg_distance_m']]
 bars = ax8.barh(top_accessible['city'], top_accessible['avg_distance_m'], color=colors_access)
 ax8.set_title("Top 15 miast - najlepsza dostępność Żabki", fontweight='bold', fontsize=13)
 ax8.set_xlabel("Średni dystans do Żabki (m)")
 ax8.invert_yaxis()
 for i, (bar, val) in enumerate(zip(bars, top_accessible['avg_distance_m'])):
-    ax8.text(val + 10, bar.get_y() + bar.get_height()/2, f'{int(val)}m', 
+    ax8.text(val + 10, bar.get_y() + bar.get_height()/2, f'{int(val)}m',
              va='center', fontsize=9)
 
 # 9. KORELACJA: GĘSTOŚĆ VS SKLEPY
 ax9 = fig2.add_subplot(gs2[1, 0])
 # Agregacja per komórka - ile mieszkańców na km² vs ile sklepów w promieniu 1km
+# (tu: liczba sklepów w komórce, analiza poglądowa na próbie danych).
 grid_with_pop = gdf_population[gdf_population['RES'] > 100].copy()
 sample_corr = grid_with_pop.sample(min(3000, len(grid_with_pop)), random_state=42)
 
@@ -342,7 +408,7 @@ ax9.scatter(sample_corr['RES'], sample_corr['shop_count'], alpha=0.4, s=15, colo
 mask_valid = (sample_corr['shop_count'] > 0) & (sample_corr['RES'] > 0)
 if mask_valid.sum() > 10:
     slope, intercept, r_value, _, _ = stats.linregress(
-        sample_corr.loc[mask_valid, 'RES'], 
+        sample_corr.loc[mask_valid, 'RES'],
         sample_corr.loc[mask_valid, 'shop_count']
     )
     x_line = np.linspace(sample_corr['RES'].min(), sample_corr['RES'].max(), 100)
@@ -355,12 +421,13 @@ ax9.set_xlabel("Liczba mieszkańców w komórce")
 ax9.set_ylabel("Liczba sklepów")
 
 # 10. BOXPLOT - DYSTANSE WG WOJEWÓDZTW
+# Porównanie rozkładów dystansu; próbka dla czytelności wykresu.
 ax10 = fig2.add_subplot(gs2[1, 1])
 voiv_order = gdf_population.groupby('voivodeship')['distance_km'].median().sort_values().index
 pop_sample = gdf_population[gdf_population['RES'] > 50].sample(
     min(10000, len(gdf_population)), random_state=42
 )
-sns.boxplot(data=pop_sample, x='voivodeship', y='distance_km', 
+sns.boxplot(data=pop_sample, x='voivodeship', y='distance_km',
             order=voiv_order, palette='viridis', ax=ax10)
 ax10.set_title("Dystans do Żabki wg województw", fontweight='bold', fontsize=13)
 ax10.set_xlabel("Województwo")
@@ -459,6 +526,10 @@ print("✓ Eksport CSV zakończony: output/csv/")
 # ============================================================================
 # MAPA INTERAKTYWNA - KOMPLEKSOWA (WSZYSTKIE WARSTWY)
 # ============================================================================
+# Warstwy mapy:
+# 1) Sklepy (klastry), 2) Obszary niedostępne, 3) Heatmapa gęstości,
+# 4) Choropleth obciążenia (ludzie/sklep), 5) Strefy dostępności,
+# 6) Top lokalizacje ekspansji.
 
 print("\n" + "=" * 70)
 print("MAPA INTERAKTYWNA")
@@ -493,7 +564,7 @@ for _, row in underserved_4326.iterrows():
     c = row.geometry.centroid
     color = color_map.get(row.distance_cat, '#999')
     radius = min(18, max(6, row.RES / 200))
-    
+
     folium.CircleMarker(
         [c.y, c.x],
         radius=radius,
@@ -525,6 +596,7 @@ gdf_with_shops = gdf_population[gdf_population['shop_count'] > 0].copy()
 gdf_with_shops_4326 = gdf_with_shops.to_crs(epsg=4326)
 
 # Bins - proste przedziały do 95 percentyla, potem jeden duży przedział do max
+# Zapobiega dominacji wartości skrajnych na mapie.
 percentile_95 = gdf_with_shops['people_per_shop'].quantile(0.95)
 max_val = gdf_with_shops['people_per_shop'].max()
 
@@ -597,7 +669,7 @@ for _, row in sample_zones.iterrows():
     c = row.geometry.centroid
     color = color_map.get(row.distance_cat, '#999')
     radius = min(10, max(3, row.RES / 300))
-    
+
     folium.CircleMarker(
         [c.y, c.x],
         radius=radius,
@@ -617,7 +689,7 @@ top_10_locations = underserved.head(10).to_crs(epsg=4326)
 
 for rank, (_, row) in enumerate(top_10_locations.iterrows(), 1):
     c = row.geometry.centroid
-    
+
     folium.Marker(
         [c.y, c.x],
         popup=f"""
@@ -663,6 +735,7 @@ print("✓ Zapisano: output/mapa_interaktywna.html")
 # ============================================================================
 # RAPORT KOŃCOWY
 # ============================================================================
+# Podsumowanie plików i kluczowych metryk (do przerobienia na markdown).
 
 print("\n" + "=" * 70)
 print("RAPORT KOŃCOWY")
